@@ -1,70 +1,59 @@
 name: LWJGL3 Android natives
 
-# Near-verbatim port of AngelAuraMC/lwjgl3's own Android CI recipe
-# (.github/workflows/build-android.yml + ci_build_android.bash), moved into
-# its own dedicated public repo, following the same pattern this project
-# already uses for feeldev12/nerion-android-jdk-build (build from source in
-# our own CI, publish our own artifacts to our own GitHub Release — do not
-# hotlink or re-host someone else's compiled output).
+# Builds bionic-linked LWJGL3 natives for Android from AngelAuraMC/lwjgl3's Android recipe
+# (.github/workflows/build-android.yml + ci_build_android.bash on each version's rebase branch)
+# and publishes them as a GitHub Release in this repo, one tag per LWJGL version
+# (`lwjgl-<version>-android`). We build from source in our own CI instead of re-hosting someone
+# else's compiled output, same as feeldev12/nerion-android-jdk-build.
 #
-# WHY this exists: Maven Central's official org.lwjgl:*:natives-linux-arm64
-# jars are built for generic glibc Linux (DT_NEEDED libpthread.so.0,
-# libc.so.6, ld-linux-aarch64.so.1, libdl.so.2 — versioned glibc SONAMEs).
-# Android's bionic libc does not export those SONAMEs (bionic folds pthread
-# into libc.so, no versioned libc.so.6), so those jars fail at runtime with
-# `dlopen failed: library "libpthread.so.0" not found`. AngelAuraMC/lwjgl3
-# carries a real, working Android build (bionic-only SONAMEs, verified by
-# hand against the reference repo's own CI artifact before this workflow was
-# written) — we build from that same recipe ourselves instead of hotlinking
-# their released artifact.
+# WHY: Maven Central's org.lwjgl:*:natives-linux-arm64 jars are linked against glibc SONAMEs
+# (libpthread.so.0, libc.so.6, ...) that Android's bionic libc doesn't have, so they fail with
+# `dlopen failed: library "libpthread.so.0" not found`.
 #
-# Reference / fork source:
-#   repo:   AngelAuraMC/lwjgl3
-#   branch: wip/rebase_3.3.3
-#   pinned commit: 6a564a8b4b1438699e9d7ccb42548e4ba454fd30 (2026-07-08)
-#   upstream CI run that proved this commit builds cleanly on GitHub Actions:
-#     https://github.com/AngelAuraMC/lwjgl3/actions/runs/28921361028 (success)
+# Runs by hand only (workflow_dispatch), one LWJGL version per run, so editing this file never
+# republishes a release by accident. Known-good inputs:
+#   3.3.3: ref 6a564a8b4b1438699e9d7ccb42548e4ba454fd30 (wip/rebase_3.3.3), jdk 21
+#   3.4.1: ref 702c2102a2876cdf67d1d57f6819fa2d458217d9 (wip/rebase_3.4.1, upstream CI green 2026-07-08), jdk 25
 #
-# LWJGL itself is BSD-3-Clause (permissive) — there is no GPL-style
-# source-correspondence requirement to build from source here, unlike the
-# OpenJDK (GPLv2) pipeline. We still build from source in our own CI, not
-# from AngelAuraMC's released artifact, for consistency/maintainability with
-# this project's other from-source pipelines and to keep full control over
-# re-builds.
+# Besides the LWJGL natives (lwjgl, opengl, stb, freetype, tinyfd, vma, ... + libshaderc, which the
+# recipe downloads from AngelAuraMC/shaderc), the release carries `libspirv-cross.so`: the
+# SPIRV-Cross C API LWJGL's spvc module loads, built here from KhronosGroup/SPIRV-Cross. Minecraft
+# 26.2+ loads shaderc, vma and spvc at startup even when rendering with OpenGL.
 #
-# CHANGES FROM THE ORIGINAL build-android.yml:
-#   - Dropped the `aar` job entirely — app-launcher consumes raw .so files
-#     directly (same as the JDK pipeline), not a Gradle AAR.
-#   - Added our own `publish` job: downloads all four per-ABI artifacts,
-#     renames each .so to this repo's own stable naming scheme
-#     (`{original-stem}-{android-abi}.so`, e.g. `liblwjgl-arm64-v8a.so`),
-#     computes sha256 for each, and publishes everything to a stable GitHub
-#     Release in THIS repo (tag `lwjgl-3.3.3-android`) using the built-in
-#     GITHUB_TOKEN.
-#   - ABI naming is translated from the reference repo's own shorthand
-#     (arm64/arm32/x86/x64) to the arm64-v8a/armeabi-v7a/x86/x86_64
-#     convention app-launcher's Rust code already standardizes on (see
-#     src-tauri/src/commands/java.rs's `AndroidAbi::android_abi_name()`), so
-#     app-launcher's Rust side does not need a second ABI-naming translation
-#     layer just for this pipeline.
+# Every .so is renamed `{stem}-{android-abi}.so` (e.g. `liblwjgl-arm64-v8a.so`), the ABI names
+# app-launcher's Rust side uses, with a `.sha256` sidecar it verifies before writing the file.
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/lwjgl3-android.yml'
+    inputs:
+      lwjgl_version:
+        description: LWJGL version (release tag becomes lwjgl-<version>-android)
+        required: true
+        default: "3.4.1"
+      reference_ref:
+        description: AngelAuraMC/lwjgl3 commit to build (pin a commit, not a branch)
+        required: true
+        default: "702c2102a2876cdf67d1d57f6819fa2d458217d9"
+      jdk:
+        description: JDK the recipe builds with (JDK 8 is always installed too, as JAVA8_HOME)
+        required: true
+        default: "25"
+      spirv_cross_ref:
+        description: KhronosGroup/SPIRV-Cross tag for libspirv-cross.so
+        required: true
+        default: "vulkan-sdk-1.4.341.0"
 
 permissions:
   contents: write
 
 env:
   REFERENCE_REPO: AngelAuraMC/lwjgl3
-  REFERENCE_REF: 6a564a8b4b1438699e9d7ccb42548e4ba454fd30
-  LWJGL_VERSION: 3.3.3
+  LWJGL_VERSION: ${{ inputs.lwjgl_version }}
+  REFERENCE_REF: ${{ inputs.reference_ref }}
 
 jobs:
   build:
-    name: "Build LWJGL ${{ matrix.arch }} (${{ matrix.abi }})"
+    name: "Build LWJGL ${{ inputs.lwjgl_version }} ${{ matrix.arch }} (${{ matrix.abi }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -87,11 +76,13 @@ jobs:
           ref: ${{ env.REFERENCE_REF }}
           path: reference-build
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v3
+      - name: Set up JDK 8 + ${{ inputs.jdk }}
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: 21
+          java-version: |
+            8
+            ${{ inputs.jdk }}
 
       - name: Build LWJGL for Android ${{ matrix.arch }}
         working-directory: reference-build
@@ -114,22 +105,64 @@ jobs:
           done
           ls -la "$GITHUB_WORKSPACE/publish/${{ matrix.abi }}"
 
-      - name: Upload native build output (our own build, not AngelAuraMC's)
+      - name: Upload native build output
         uses: actions/upload-artifact@v4
         with:
           name: "lwjgl-${{ env.LWJGL_VERSION }}-android-${{ matrix.abi }}"
           path: publish/${{ matrix.abi }}
 
+  spirv-cross:
+    name: "Build SPIRV-Cross C API (${{ matrix.abi }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86, x86_64]
+    steps:
+      - name: Checkout SPIRV-Cross
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/SPIRV-Cross
+          ref: ${{ inputs.spirv_cross_ref }}
+          path: spirv-cross
+
+      - name: Build libspirv-cross-c-shared with the NDK
+        working-directory: spirv-cross
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G "Unix Makefiles" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPIRV_CROSS_SHARED=ON \
+            -DSPIRV_CROSS_STATIC=OFF \
+            -DSPIRV_CROSS_CLI=OFF \
+            -DSPIRV_CROSS_ENABLE_TESTS=OFF
+          cmake --build build -j"$(nproc)"
+          lib=$(find build -maxdepth 1 -name 'libspirv-cross-c-shared.so*' -type f | head -n1)
+          test -n "$lib"
+          # LWJGL's spvc module loads it by this name (org.lwjgl.util.spvc.Spvc: "spirv-cross").
+          mkdir -p "$GITHUB_WORKSPACE/publish"
+          out="$GITHUB_WORKSPACE/publish/libspirv-cross-${{ matrix.abi }}.so"
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" -o "$out" "$lib"
+          sha256sum "$out" | awk '{print $1}' > "$out.sha256"
+          ls -la "$GITHUB_WORKSPACE/publish"
+
+      - name: Upload SPIRV-Cross output
+        uses: actions/upload-artifact@v4
+        with:
+          name: "lwjgl-${{ env.LWJGL_VERSION }}-android-spirv-cross-${{ matrix.abi }}"
+          path: publish
+
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, spirv-cross]
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: lwjgl-3.3.3-android
+      RELEASE_TAG: lwjgl-${{ inputs.lwjgl_version }}-android
     steps:
-      - name: Checkout this repo
-        uses: actions/checkout@v4
-
       - name: Download all per-ABI artifacts
         uses: actions/download-artifact@v4
         with:
@@ -144,27 +177,19 @@ jobs:
           ls -la release
 
       - name: Publish natives to a stable public GitHub Release
-        # Re-running this workflow re-uploads to the SAME tag, replacing
-        # assets in place (softprops/action-gh-release updates an existing
-        # release's assets rather than failing on tag collision) — same
-        # convention as feeldev12/nerion-android-jdk-build.
+        # Re-running for the same version replaces that release's assets in place.
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "LWJGL 3.3.3 Android natives (bionic)"
+          name: "LWJGL ${{ env.LWJGL_VERSION }} Android natives (bionic)"
           body: |
-            Self-built, bionic-linked LWJGL 3.3.3 Android native libraries
-            (lwjgl, lwjgl-opengl, lwjgl-stb, lwjgl-freetype, lwjgl-tinyfd),
-            one set per supported ABI (arm64-v8a, armeabi-v7a, x86, x86_64).
+            Self-built, bionic-linked LWJGL ${{ env.LWJGL_VERSION }} Android native libraries, one
+            set per ABI (arm64-v8a, armeabi-v7a, x86, x86_64), plus libspirv-cross (SPIRV-Cross C
+            API, ${{ inputs.spirv_cross_ref }}) for LWJGL's spvc module.
 
-            Built from AngelAuraMC/lwjgl3@${{ env.REFERENCE_REF }}
-            (branch wip/rebase_3.3.3) via this repo's own
+            Built from ${{ env.REFERENCE_REPO }}@${{ env.REFERENCE_REF }} and
+            KhronosGroup/SPIRV-Cross@${{ inputs.spirv_cross_ref }} by this repo's
             `.github/workflows/lwjgl3-android.yml` (run ${{ github.run_id }}).
-
-            Fixes the glibc-vs-bionic ABI mismatch present in Maven Central's
-            official org.lwjgl:*:natives-linux-arm64 jars (those are linked
-            against versioned glibc SONAMEs like libpthread.so.0/libc.so.6,
-            which do not exist on Android/bionic).
           draft: false
           prerelease: false
           files: |
